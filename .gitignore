@@ -1,0 +1,14 @@
+# python
+.venv/
+
+
+# IDE 
+.idea/
+
+# school relevant details
+_academic/
+
+
+# dataset
+dataset/
+backened/lexicon.json
