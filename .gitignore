@@ -19,6 +19,10 @@ backend/cpp/*.o
 backend/data/*
 !backend/data/.gitkeep
 
+# dataset output files
+backend/indexes/*
+!backend/indexes/.gitkeep
+
 # IDE settings
 backend/cpp/cmake-build-debug/
 backend/.idea/
