@@ -1,26 +1,26 @@
-# In your project root
-touch .gitignore
-```
+# for academic purposes
+_academic/
 
-**Add patterns to ignore:**
-```
-# .gitignore file
+# for py VIRTUAL_ENV
+backend/.venv/
 
-# Ignore specific file
-metadata.csv
-pmc_comparison_report.txt
+# for py
+backend/py/__pycache__/
 
-# Ignore all CSVs
-*.csv
+# for cpp
+backend/cpp/*.exe
+backend/cpp/forwardIndex
+backend/cpp/invertedIndex
+forwardIndex
+invertedIndex
+backend/cpp/*.o
 
-# Ignore entire folder
-document_parses/
+# dataset setting
+backend/data/*
+!backend/data/.gitkeep
 
-# Ignore files in specific location
-data/*.json
+# IDE settings
+backend/cpp/cmake-build-debug/
+backend/.idea/
+backend/cpp/.idea/
 
-# Ignore compiled executables
-*.exe
-*.out
-metadata_analyzer
-folder_scanner

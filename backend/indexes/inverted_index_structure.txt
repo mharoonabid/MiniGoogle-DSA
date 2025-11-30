@@ -1,0 +1,1 @@
+Format: `lemma_id|doc_frequency|doc1:tf1,doc2:tf2,...`
