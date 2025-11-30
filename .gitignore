@@ -1,14 +1,26 @@
-# python
-.venv/
+# In your project root
+touch .gitignore
+```
 
+**Add patterns to ignore:**
+```
+# .gitignore file
 
-# IDE 
-.idea/
+# Ignore specific file
+metadata.csv
+pmc_comparison_report.txt
 
-# school relevant details
-_academic/
+# Ignore all CSVs
+*.csv
 
+# Ignore entire folder
+document_parses/
 
-# dataset
-dataset/
-backened/lexicon.json
+# Ignore files in specific location
+data/*.json
+
+# Ignore compiled executables
+*.exe
+*.out
+metadata_analyzer
+folder_scanner
