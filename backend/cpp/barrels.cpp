@@ -228,7 +228,7 @@ int main() {
         
         // Get paths
         fs::path indexesDir = backendDir / config["indexes_dir"].get<string>();
-        fs::path invertedIndexPath = indexesDir / config["inverted_index_file_full"].get<string>();
+        fs::path invertedIndexPath = indexesDir / config["inverted_index_file"].get<string>();
         fs::path barrelsDir = indexesDir / "barrelsFull";
         
         // Configuration

@@ -303,7 +303,7 @@ public:
 int main() {
     try {
         // this file is in backend/cpp
-        fs::path backendDir = fs::current_path() / "backend"; // backend/
+        fs::path backendDir = fs::current_path().parent_path(); // backend/
 
         // Load centralized config
         json config = loadConfig(backendDir);
