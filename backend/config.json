@@ -1,8 +1,9 @@
 {
-    "data_dir" : "data",
-    "indexes_dir" : "indexes",
+    "data_dir" : "data", 
+    "indexes_dir" : "indexes", 
     "lexicon_file" : "lexicon.json",
     "forward_index_file" : "forward_index.txt",
     "inverted_index_file" : "inverted_index.txt",
+    "barrels_dir" : "barrels",
     "json_data" : "pmc_json"
 }

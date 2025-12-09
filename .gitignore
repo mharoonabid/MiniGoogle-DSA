@@ -8,12 +8,8 @@ backend/.venv/
 backend/py/__pycache__/
 
 # for cpp
-backend/cpp/*.exe
-backend/cpp/forwardIndex
-backend/cpp/invertedIndex
-forwardIndex
-invertedIndex
-backend/cpp/*.o
+backend/cpp/build/*
+!backend/cpp/build/.gitkeep
 
 # dataset setting
 backend/data/*

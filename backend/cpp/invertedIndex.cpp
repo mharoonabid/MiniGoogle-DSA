@@ -1,7 +1,6 @@
 #include "config.hpp"
 
 #include <iostream>
-#include <fstream>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -278,7 +277,7 @@ private:
 int main() {
     try {
         // Assume this file is in backend/cpp
-        fs::path backendDir = fs::current_path() / "backend"; // backend/
+        fs::path backendDir = fs::current_path().parent_path(); // backend/
 
         // Load centralized config
         json config = loadConfig(backendDir);
