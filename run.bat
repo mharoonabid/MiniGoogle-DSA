@@ -65,18 +65,21 @@ IF ERRORLEVEL 1 (
     exit /b 1
 )
 
+REM --- Create Build Directory ---
+if not exist "backend\cpp\build" mkdir "backend\cpp\build"
+
 REM --- Build Forward Index ---
 echo Building Forward Index...
 IF %USE_CL%==0 (
-    g++ -o forwardIndex.exe backend\cpp\forwardIndex.cpp backend\cpp\config.cpp -std=c++17
+    g++ -o backend\cpp\build\forwardIndex.exe backend\cpp\forwardIndex.cpp -std=c++17
 ) ELSE (
-    cl /EHsc /std:c++17 backend\cpp\forwardIndex.cpp backend\cpp\config.cpp
+    cl /EHsc /std:c++17 /Fe:backend\cpp\build\forwardIndex.exe backend\cpp\forwardIndex.cpp
 )
 IF ERRORLEVEL 1 (
     echo Forward index compilation failed.
     exit /b 1
 )
-forwardIndex.exe
+backend\cpp\build\forwardIndex.exe
 IF ERRORLEVEL 1 (
     echo Forward index run failed.
     exit /b 1
@@ -85,17 +88,34 @@ IF ERRORLEVEL 1 (
 REM --- Build Inverted Index ---
 echo Building Inverted Index...
 IF %USE_CL%==0 (
-    g++ -o invertedIndex.exe backend\cpp\invertedIndex.cpp backend\cpp\config.cpp -std=c++17
+    g++ -o backend\cpp\build\invertedIndex.exe backend\cpp\invertedIndex.cpp -std=c++17
 ) ELSE (
-    cl /EHsc /std:c++17 backend\cpp\invertedIndex.cpp backend\cpp\config.cpp
+    cl /EHsc /std:c++17 /Fe:backend\cpp\build\invertedIndex.exe backend\cpp\invertedIndex.cpp
 )
 IF ERRORLEVEL 1 (
     echo Inverted index compilation failed.
     exit /b 1
 )
-invertedIndex.exe
+backend\cpp\build\invertedIndex.exe
 IF ERRORLEVEL 1 (
     echo Inverted index run failed.
+    exit /b 1
+)
+
+REM --- Build Inverted Barrels (NEW) ---
+echo Building Inverted Barrels...
+IF %USE_CL%==0 (
+    g++ -o backend\cpp\build\barrels.exe backend\cpp\barrels.cpp -std=c++17
+) ELSE (
+    cl /EHsc /std:c++17 /Fe:backend\cpp\build\barrels.exe backend\cpp\barrels.cpp
+)
+IF ERRORLEVEL 1 (
+    echo Barrels compilation failed.
+    exit /b 1
+)
+backend\cpp\build\barrels.exe
+IF ERRORLEVEL 1 (
+    echo Barrels run failed.
     exit /b 1
 )
 

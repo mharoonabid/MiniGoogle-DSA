@@ -1,11 +1,9 @@
 #include "config.hpp"
 
 #include <iostream>
-#include <fstream>
 #include <sstream>
 #include <string>
 #include <vector>
-#include <unordered_map>
 #include <chrono>
 
 
@@ -229,10 +227,10 @@ int main() {
         // Get paths
         fs::path indexesDir = backendDir / config["indexes_dir"].get<string>();
         fs::path invertedIndexPath = indexesDir / config["inverted_index_file"].get<string>();
-        fs::path barrelsDir = indexesDir / "barrelsFull";
+        fs::path barrelsDir = indexesDir / config["barrels_dir"];
         
         // Configuration
-        int numBarrels = 10;
+        const int numBarrels = 10;
         
         cout << "Configuration:" << endl;
         cout << "  Number of barrels: " << numBarrels << endl;

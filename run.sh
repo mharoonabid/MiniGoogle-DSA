@@ -46,15 +46,15 @@ echo -e "${BLUE}=== Running Lexicon Script ===${RESET}"
 $PYTHON -u backend/py/lexicon.py || { echo -e "${RED}Lexicon generation failed.${RESET}"; exit 1; }
 
 echo -e "${BLUE}=== Building Forward Index ===${RESET}"
-g++ -o backend/cpp/build/forwardIndex backend/cpp/forwardIndex.cpp backend/cpp/config.cpp -std=c++17 || { echo -e "${RED}Forward index compilation failed.${RESET}"; exit 1; }
+g++ -o backend/cpp/build/forwardIndex backend/cpp/forwardIndex.cpp -std=c++17 || { echo -e "${RED}Forward index compilation failed.${RESET}"; exit 1; }
 ./backend/cpp/build/forwardIndex || { echo -e "${RED}Forward index run failed.${RESET}"; exit 1; }
 
 echo -e "${BLUE}=== Building Inverted Index ===${RESET}"
-g++ -o backend/cpp/build/invertedIndex backend/cpp/invertedIndex.cpp backend/cpp/config.cpp -std=c++17 || { echo -e "${RED}Inverted index compilation failed.${RESET}"; exit 1; }
+g++ -o backend/cpp/build/invertedIndex backend/cpp/invertedIndex.cpp -std=c++17 || { echo -e "${RED}Inverted index compilation failed.${RESET}"; exit 1; }
 .backend/cpp/build/invertedIndex || { echo -e "${RED}Inverted index run failed.${RESET}"; exit 1; }
 
 echo -e "${BLUE}=== Building Inverted Barrels ===${RESET}"
-g++ -o backend/cpp/build/barrels backend/cpp/barrels.cpp backend/cpp/config.cpp -std=c++17 || { echo -e "${RED}Barrels compilation failed.${RESET}"; exit 1; }
+g++ -o backend/cpp/build/barrels backend/cpp/barrels.cpp -std=c++17 || { echo -e "${RED}Barrels compilation failed.${RESET}"; exit 1; }
 .backend/cpp/build/barrels || { echo -e "${RED}Barrels run failed.${RESET}"; exit 1; }
 
 
