@@ -39,12 +39,18 @@ using namespace std::chrono;
 const int DOC_ID_SIZE = 20;
 const int TOTAL_DOCS = 59000;  // Approximate total documents for IDF calculation
 
+// BM25 Parameters
+const double BM25_K1 = 1.5;    // Term saturation parameter (typical: 1.2-2.0)
+const double BM25_B = 0.75;    // Length normalization (typical: 0.75)
+const int AVG_DOC_LENGTH = 200; // Average document length in terms
+
 // ---------------------- Data Structures ----------------------
 
 struct DocPosting {
     std::string docId;
     int tf;           // Term frequency
-    double score;     // TF-IDF score
+    int docLength;    // Document length (for BM25)
+    double score;     // BM25 score
 };
 
 struct IndexEntry {
@@ -297,6 +303,7 @@ bool findPostingsBinary(
         DocPosting dp;
         dp.docId = std::string(docIdBuf);
         dp.tf = tf;
+        dp.docLength = AVG_DOC_LENGTH;  // Use average for now (can be read from metadata later)
         dp.score = 0.0;
 
         postingsOut.push_back(dp);
@@ -377,8 +384,25 @@ bool findPostings(
     return findPostingsJSON(backendDir, config, lemmaId, postingsOut, dfOut, barrelIdOut);
 }
 
-// ---------------------- TF-IDF Scoring ----------------------
+// ---------------------- BM25 Scoring ----------------------
 
+double calculateBM25(int tf, int df, int docLength, int totalDocs = TOTAL_DOCS, int avgDocLen = AVG_DOC_LENGTH) {
+    if (tf == 0 || df == 0) return 0.0;
+
+    // IDF component: log((N - df + 0.5) / (df + 0.5))
+    // This gives better discrimination than classic IDF
+    double idf = std::log((static_cast<double>(totalDocs - df) + 0.5) / (static_cast<double>(df) + 0.5));
+
+    // Length normalization factor
+    double lengthNorm = 1.0 - BM25_B + BM25_B * (static_cast<double>(docLength) / static_cast<double>(avgDocLen));
+
+    // TF component with saturation
+    double tfComponent = (static_cast<double>(tf) * (BM25_K1 + 1.0)) / (static_cast<double>(tf) + BM25_K1 * lengthNorm);
+
+    return idf * tfComponent;
+}
+
+// Legacy TF-IDF function (kept for compatibility)
 double calculateTFIDF(int tf, int df, int totalDocs = TOTAL_DOCS) {
     if (tf == 0 || df == 0) return 0.0;
 
@@ -449,7 +473,8 @@ std::vector<QueryResult> processMultiWordQuery(
         int df = dfs[i];
 
         for (const auto& posting : allPostings[i]) {
-            double tfidf = calculateTFIDF(posting.tf, df);
+            // Use BM25 instead of TF-IDF for better ranking
+            double bm25 = calculateBM25(posting.tf, df, posting.docLength);
 
             auto& result = docScores[posting.docId];
             if (result.docId.empty()) {
@@ -459,7 +484,7 @@ std::vector<QueryResult> processMultiWordQuery(
                 result.termFreqs.resize(allPostings.size(), 0);
             }
 
-            result.totalScore += tfidf;
+            result.totalScore += bm25;
             result.matchedTerms++;
             result.termFreqs[i] = posting.tf;
         }
@@ -506,12 +531,12 @@ std::vector<DocPosting> processSingleWordQuery(
         return {};
     }
 
-    // Calculate TF-IDF scores
+    // Calculate BM25 scores
     for (auto& p : postings) {
-        p.score = calculateTFIDF(p.tf, dfOut);
+        p.score = calculateBM25(p.tf, dfOut, p.docLength);
     }
 
-    // Sort by TF-IDF score
+    // Sort by BM25 score
     std::sort(postings.begin(), postings.end(),
               [](const DocPosting& a, const DocPosting& b) {
                   if (std::abs(a.score - b.score) > 0.001) return a.score > b.score;
@@ -644,7 +669,7 @@ int main(int argc, char* argv[]) {
             for (size_t i = 0; i < std::min(TOP_K, results.size()); i++) {
                 std::cout << (i + 1) << ". DocID: " << results[i].docId
                           << " | tf: " << results[i].tf
-                          << " | TF-IDF: " << results[i].score << std::endl;
+                          << " | BM25: " << results[i].score << std::endl;
             }
 
         } else {
