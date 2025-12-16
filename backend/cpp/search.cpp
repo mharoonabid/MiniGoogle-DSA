@@ -391,7 +391,101 @@ double calculateTFIDF(int tf, int df, int totalDocs = TOTAL_DOCS) {
     return tfScore * idf;
 }
 
+// ---------------------- Multi-Word Query Processing ----------------------
 
+enum QueryMode { AND_MODE, OR_MODE };
+
+struct QueryResult {
+    std::string docId;
+    double totalScore;
+    int matchedTerms;
+    std::vector<int> termFreqs;  // TF for each query term
+};
+
+std::vector<QueryResult> processMultiWordQuery(
+    const fs::path& backendDir,
+    const json& config,
+    const std::vector<std::string>& queryWords,
+    QueryMode mode,
+    std::vector<int>& lemmaIds,
+    std::vector<int>& dfs
+) {
+    // Get postings for each word
+    std::vector<std::vector<DocPosting>> allPostings;
+    lemmaIds.clear();
+    dfs.clear();
+
+    for (const auto& word : queryWords) {
+        int lemmaId;
+        if (!getLemmaIdForWord(word, lemmaId)) {
+            std::cout << "  Word '" << word << "': not found in lexicon" << std::endl;
+            continue;
+        }
+
+        std::vector<DocPosting> postings;
+        int df, barrelId;
+
+        if (!findPostings(backendDir, config, lemmaId, postings, df, barrelId)) {
+            std::cout << "  Word '" << word << "': no postings found" << std::endl;
+            continue;
+        }
+
+        std::cout << "  Word '" << word << "': lemmaId=" << lemmaId
+                  << ", df=" << df << ", barrel=" << barrelId << std::endl;
+
+        lemmaIds.push_back(lemmaId);
+        dfs.push_back(df);
+        allPostings.push_back(postings);
+    }
+
+    if (allPostings.empty()) {
+        return {};
+    }
+
+    // Build document -> scores map
+    std::unordered_map<std::string, QueryResult> docScores;
+
+    for (size_t i = 0; i < allPostings.size(); i++) {
+        int df = dfs[i];
+
+        for (const auto& posting : allPostings[i]) {
+            double tfidf = calculateTFIDF(posting.tf, df);
+
+            auto& result = docScores[posting.docId];
+            if (result.docId.empty()) {
+                result.docId = posting.docId;
+                result.totalScore = 0.0;
+                result.matchedTerms = 0;
+                result.termFreqs.resize(allPostings.size(), 0);
+            }
+
+            result.totalScore += tfidf;
+            result.matchedTerms++;
+            result.termFreqs[i] = posting.tf;
+        }
+    }
+
+    // Filter by query mode
+    std::vector<QueryResult> results;
+    int requiredTerms = (mode == AND_MODE) ? static_cast<int>(allPostings.size()) : 1;
+
+    for (auto& [docId, result] : docScores) {
+        if (result.matchedTerms >= requiredTerms) {
+            results.push_back(result);
+        }
+    }
+
+    // Sort by score descending
+    std::sort(results.begin(), results.end(),
+              [](const QueryResult& a, const QueryResult& b) {
+                  if (std::abs(a.totalScore - b.totalScore) > 0.001) {
+                      return a.totalScore > b.totalScore;
+                  }
+                  return a.matchedTerms > b.matchedTerms;
+              });
+
+    return results;
+}
 
 // ---------------------- Single-Word Query Processing ----------------------
 
@@ -492,7 +586,7 @@ int main(int argc, char* argv[]) {
                 }
             }
         } else {
-            std::cout << "Enter query (single): ";
+            std::cout << "Enter query (single or multi-word): ";
             if (!std::getline(std::cin, queryString)) {
                 std::cerr << "No query provided.\n";
                 return 1;
@@ -553,7 +647,44 @@ int main(int argc, char* argv[]) {
                           << " | TF-IDF: " << results[i].score << std::endl;
             }
 
-        } 
+        } else {
+            // Multi-word query
+            std::cout << "Query: '" << queryString << "' ("
+                      << (mode == AND_MODE ? "AND" : "OR") << " mode)\n" << std::endl;
+
+            std::cout << "Processing " << queryWords.size() << " words:" << std::endl;
+
+            std::vector<int> lemmaIds, dfs;
+            auto results = processMultiWordQuery(backendDir, config, queryWords, mode, lemmaIds, dfs);
+
+            auto searchEnd = high_resolution_clock::now();
+            auto searchTime = duration_cast<milliseconds>(searchEnd - searchStart).count();
+
+            if (results.empty()) {
+                std::cout << "\nNo documents found matching "
+                          << (mode == AND_MODE ? "ALL" : "ANY") << " query terms.\n";
+                return 0;
+            }
+
+            std::cout << "\nFound " << results.size() << " matching documents" << std::endl;
+            std::cout << "\nTop " << std::min(TOP_K, results.size())
+                      << " results (in " << searchTime << "ms):\n" << std::endl;
+
+            for (size_t i = 0; i < std::min(TOP_K, results.size()); i++) {
+                const auto& r = results[i];
+                std::cout << (i + 1) << ". DocID: " << r.docId
+                          << " | Score: " << r.totalScore
+                          << " | Matched: " << r.matchedTerms << "/" << queryWords.size();
+
+                // Show TF for each term
+                std::cout << " | TFs: [";
+                for (size_t j = 0; j < r.termFreqs.size(); j++) {
+                    if (j > 0) std::cout << ",";
+                    std::cout << r.termFreqs[j];
+                }
+                std::cout << "]" << std::endl;
+            }
+        }
 
         auto totalEnd = high_resolution_clock::now();
         auto totalTime = duration_cast<milliseconds>(totalEnd - totalStart).count();
