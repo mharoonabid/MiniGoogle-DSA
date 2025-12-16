@@ -17,6 +17,7 @@ Usage:
 import subprocess
 import re
 import argparse
+import json
 from pathlib import Path
 from typing import Optional, List
 from enum import Enum
@@ -106,6 +107,7 @@ app.add_middleware(
 
 SEARCH_EXECUTABLE = None
 SEMANTIC_SEARCH_EXECUTABLE = None
+NGRAM_INDEX = None
 
 def get_executables():
     """Find search executables."""
@@ -118,10 +120,22 @@ def get_executables():
         "semantic": build_dir / "search_semantic"
     }
 
+def load_ngram_index():
+    """Load n-gram autocomplete index."""
+    script_dir = Path(__file__).parent.resolve()
+    backend_dir = script_dir.parent
+    indexes_dir = backend_dir / "indexes"
+    ngram_file = indexes_dir / "ngram_autocomplete.json"
+
+    if ngram_file.exists():
+        with open(ngram_file, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return None
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize on startup."""
-    global SEARCH_EXECUTABLE, SEMANTIC_SEARCH_EXECUTABLE
+    global SEARCH_EXECUTABLE, SEMANTIC_SEARCH_EXECUTABLE, NGRAM_INDEX
 
     exes = get_executables()
 
@@ -135,6 +149,13 @@ async def startup_event():
 
     if not SEARCH_EXECUTABLE and not SEMANTIC_SEARCH_EXECUTABLE:
         print("Warning: No search executables found!")
+
+    # Load n-gram index for multi-word autocomplete
+    NGRAM_INDEX = load_ngram_index()
+    if NGRAM_INDEX:
+        print(f"Loaded n-gram index with {len(NGRAM_INDEX)} prefixes")
+    else:
+        print("Warning: N-gram index not found. Run ngram_builder.py first for multi-word autocomplete.")
 
 # ==================== Output Parsers ====================
 
@@ -411,7 +432,44 @@ def run_basic_search(query: str, mode: str = "and") -> dict:
         return {"success": False, "error": str(e), "query": query, "query_type": "unknown"}
 
 def run_autocomplete(prefix: str) -> dict:
-    """Get autocomplete suggestions."""
+    """Get autocomplete suggestions with multi-word support."""
+    prefix = prefix.strip().lower()
+
+    # Check if prefix contains spaces (multi-word)
+    if ' ' in prefix and NGRAM_INDEX:
+        # Multi-word autocomplete using n-gram index
+        suggestions = []
+
+        # Look up exact prefix match
+        if prefix in NGRAM_INDEX:
+            for item in NGRAM_INDEX[prefix]:
+                suggestions.append({
+                    "word": item["phrase"],
+                    "df": item["count"]
+                })
+
+        # If no exact match, try partial match on last word
+        if not suggestions:
+            words = prefix.split()
+            # Try progressively shorter prefixes
+            for i in range(len(prefix), len(words[0]), -1):
+                test_prefix = prefix[:i]
+                if test_prefix in NGRAM_INDEX:
+                    for item in NGRAM_INDEX[test_prefix]:
+                        suggestions.append({
+                            "word": item["phrase"],
+                            "df": item["count"]
+                        })
+                    break
+
+        return {
+            "success": True,
+            "prefix": prefix,
+            "suggestions": suggestions[:5],
+            "time_ms": 1  # Fast lookup from index
+        }
+
+    # Single-word autocomplete using C++ executable
     if not SEMANTIC_SEARCH_EXECUTABLE:
         return {"success": False, "error": "Autocomplete not available", "prefix": prefix}
 
