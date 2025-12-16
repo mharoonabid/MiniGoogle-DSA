@@ -5,5 +5,7 @@
     "forward_index_file" : "forward_index.txt",
     "inverted_index_file" : "inverted_index.txt",
     "barrels_dir" : "barrels",
+    "barrels_binary_dir" : "barrels_binary",
+    "barrel_lookup" : "barrel_lookup.json",
     "json_data" : "pmc_json"
 }

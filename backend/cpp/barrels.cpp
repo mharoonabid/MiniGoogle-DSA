@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 #include <chrono>
+#include <unordered_map>
+
 
 
 using namespace std;
@@ -20,6 +22,8 @@ private:
     int numBarrels;
     fs::path outputDir;
     vector<json> barrels;
+    unordered_map<int, int> lemmaToBarrel;
+
     
 public:
     JSONBarrelCreator(int numBarrels, fs::path outDir) 
@@ -92,6 +96,9 @@ public:
                 barrelNum = 7 + ((lemmaId % 3));  // COLD barrels (7-9)
                 coldCount++;
             }
+
+            lemmaToBarrel[lemmaId] = barrelNum;
+
             
             // Parse line and add to barrel
             stringstream ss(lineData);
@@ -125,6 +132,7 @@ public:
             termDataJson["df"] = df;
             termDataJson["docs"] = postingList;
             
+            termDataJson["barrel_id"] = barrelNum;
             barrels[barrelNum]["postings"][lemmaIdStr] = termDataJson;
             barrels[barrelNum]["num_terms"] = barrels[barrelNum]["num_terms"].get<int>() + 1;
         }
@@ -151,6 +159,22 @@ public:
         cout << "\nProcessing time: " << duration << " seconds" << endl;
         cout << "\nTime Complexity: O(H) for hot queries where H << total_terms" << endl;
     }
+
+    void saveRoutingTable(const std::string path) {
+        json routing;
+
+        for (auto &[lemma, barrel] : lemmaToBarrel) {
+            routing[to_string(lemma)] = barrel;
+        }
+
+        fs::path filePath = outputDir / path;
+        ofstream out(filePath);
+        out << routing.dump(2);
+        out.close();
+
+        cout << "Saved lemma → barrel routing table\n";
+    }
+
     
     void saveBarrels() {
         auto startTime = high_resolution_clock::now();
@@ -228,6 +252,7 @@ int main() {
         fs::path indexesDir = backendDir / config["indexes_dir"].get<string>();
         fs::path invertedIndexPath = indexesDir / config["inverted_index_file"].get<string>();
         fs::path barrelsDir = indexesDir / config["barrels_dir"];
+        fs::path barrelsLookupPath = indexesDir / config["barrel_lookup"];
         
         // Configuration
         const int numBarrels = 10;
@@ -248,6 +273,7 @@ int main() {
         JSONBarrelCreator creator(numBarrels, barrelsDir);
         creator.createFromInvertedIndex(invertedIndexPath.string());
         creator.saveBarrels();
+        creator.saveRoutingTable(barrelsLookupPath.string());
         creator.printStatistics();
         
         cout << "\n======================================" << endl;
