@@ -226,19 +226,39 @@ function App() {
                 <li key={result.doc_id} className="result-item">
                   <div className="result-rank">{result.rank || i + 1}</div>
                   <div className="result-content">
-                    <div className="result-doc-id">
+                    {/* Title as main heading */}
+                    <h3 className="result-title">
                       <a
                         href={`https://www.ncbi.nlm.nih.gov/pmc/articles/${result.doc_id}/`}
                         target="_blank"
                         rel="noopener noreferrer"
                       >
-                        {result.doc_id}
+                        {result.title || result.doc_id}
                       </a>
+                    </h3>
+
+                    {/* Authors */}
+                    {result.authors && result.authors.length > 0 && (
+                      <div className="result-authors">
+                        {result.authors.join(', ')}
+                      </div>
+                    )}
+
+                    {/* Abstract snippet */}
+                    {result.abstract && (
+                      <p className="result-abstract">{result.abstract}</p>
+                    )}
+
+                    {/* Doc ID (smaller, secondary) */}
+                    <div className="result-doc-id">
+                      Document ID: {result.doc_id}
                     </div>
+
+                    {/* Scores */}
                     <div className="result-scores">
                       <span className="score">Score: {result.score?.toFixed(4)}</span>
                       {result.tfidf_score !== undefined && (
-                        <span className="score">TF-IDF: {result.tfidf_score?.toFixed(4)}</span>
+                        <span className="score">BM25: {result.tfidf_score?.toFixed(4)}</span>
                       )}
                       {result.pagerank_score !== undefined && (
                         <span className="score">PageRank: {result.pagerank_score?.toFixed(4)}</span>

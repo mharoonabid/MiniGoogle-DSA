@@ -46,6 +46,9 @@ class SearchResult(BaseModel):
     rank: int
     doc_id: str
     score: float
+    title: Optional[str] = None
+    authors: Optional[List[str]] = None
+    abstract: Optional[str] = None
     tfidf_score: Optional[float] = None
     pagerank_score: Optional[float] = None
     matched_terms: Optional[int] = None
@@ -108,6 +111,7 @@ app.add_middleware(
 SEARCH_EXECUTABLE = None
 SEMANTIC_SEARCH_EXECUTABLE = None
 NGRAM_INDEX = None
+DOC_METADATA = None
 
 def get_executables():
     """Find search executables."""
@@ -132,10 +136,26 @@ def load_ngram_index():
             return json.load(f)
     return None
 
+def load_doc_metadata():
+    """Load document metadata (titles, authors, abstracts)."""
+    from mock_metadata import generate_metadata
+
+    script_dir = Path(__file__).parent.resolve()
+    backend_dir = script_dir.parent
+    indexes_dir = backend_dir / "indexes"
+    metadata_file = indexes_dir / "document_metadata.json"
+
+    if metadata_file.exists():
+        with open(metadata_file, 'r', encoding='utf-8') as f:
+            return json.load(f)
+
+    # Return function to generate on-the-fly if file doesn't exist
+    return generate_metadata
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize on startup."""
-    global SEARCH_EXECUTABLE, SEMANTIC_SEARCH_EXECUTABLE, NGRAM_INDEX
+    global SEARCH_EXECUTABLE, SEMANTIC_SEARCH_EXECUTABLE, NGRAM_INDEX, DOC_METADATA
 
     exes = get_executables()
 
@@ -157,7 +177,41 @@ async def startup_event():
     else:
         print("Warning: N-gram index not found. Run ngram_builder.py first for multi-word autocomplete.")
 
+    # Load document metadata
+    DOC_METADATA = load_doc_metadata()
+    if callable(DOC_METADATA):
+        print("Document metadata: Using on-the-fly generation (mock mode)")
+    elif DOC_METADATA:
+        print(f"Loaded metadata for {len(DOC_METADATA)} documents")
+    else:
+        print("Warning: Document metadata not available")
+
 # ==================== Output Parsers ====================
+
+def enrich_result_with_metadata(result: dict) -> dict:
+    """Add title, authors, and abstract to a search result."""
+    doc_id = result.get("doc_id", "")
+
+    if not doc_id:
+        return result
+
+    # Get metadata
+    if callable(DOC_METADATA):
+        # Generate on-the-fly (mock mode)
+        metadata = DOC_METADATA(doc_id)
+    elif DOC_METADATA and doc_id in DOC_METADATA:
+        # Load from database
+        metadata = DOC_METADATA[doc_id]
+    else:
+        # No metadata available
+        return result
+
+    # Add metadata fields
+    result["title"] = metadata.get("title", "")
+    result["authors"] = metadata.get("authors", [])
+    result["abstract"] = metadata.get("abstract", "")
+
+    return result
 
 def parse_semantic_search_output(output: str) -> dict:
     """Parse semantic search output."""
@@ -219,13 +273,16 @@ def parse_semantic_search_output(output: str) -> dict:
                     "total_terms": int(match.group(7))
                 })
 
+    # Enrich results with metadata
+    enriched_results = [enrich_result_with_metadata(r) for r in results]
+
     return {
         "query_type": "semantic",
         "mode": mode,
         "expanded_terms": expanded_terms,
         "search_time_ms": search_time,
-        "result_count": len(results),
-        "results": results
+        "result_count": len(enriched_results),
+        "results": enriched_results
     }
 
 def parse_autocomplete_output(output: str) -> dict:
@@ -339,6 +396,9 @@ def parse_basic_search_output(output: str, is_multi: bool) -> dict:
                     "term_frequencies": tfs
                 })
 
+    # Enrich results with metadata
+    enriched_results = [enrich_result_with_metadata(r) for r in results]
+
     return {
         "query_type": "multi" if is_multi else "single",
         "mode": mode,
@@ -346,8 +406,8 @@ def parse_basic_search_output(output: str, is_multi: bool) -> dict:
         "barrel": barrel,
         "document_frequency": df,
         "search_time_ms": search_time,
-        "result_count": len(results),
-        "results": results
+        "result_count": len(enriched_results),
+        "results": enriched_results
     }
 
 # ==================== Search Functions ====================
