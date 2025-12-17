@@ -17,7 +17,11 @@ function App() {
   const searchInputRef = useRef(null)
   const suggestionsRef = useRef(null)
 
-  // Debounced autocomplete
+  // Cache for autocomplete results
+  const autocompleteCache = useRef(new Map())
+  const abortControllerRef = useRef(null)
+
+  // Debounced autocomplete with request cancellation and caching
   useEffect(() => {
     if (query.length < 2) {
       setSuggestions([])
@@ -25,20 +29,51 @@ function App() {
       return
     }
 
+    // Check cache first
+    const cacheKey = query.toLowerCase()
+    if (autocompleteCache.current.has(cacheKey)) {
+      setSuggestions(autocompleteCache.current.get(cacheKey))
+      setShowSuggestions(true)
+      return
+    }
+
     const timer = setTimeout(async () => {
+      // Cancel any in-flight request
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort()
+      }
+      abortControllerRef.current = new AbortController()
+
       try {
-        const res = await fetch(`${API_BASE}/autocomplete?prefix=${encodeURIComponent(query)}`)
+        const res = await fetch(
+          `${API_BASE}/autocomplete?prefix=${encodeURIComponent(query)}`,
+          { signal: abortControllerRef.current.signal }
+        )
         if (res.ok) {
           const data = await res.json()
-          setSuggestions(data.suggestions || [])
+          const suggestions = data.suggestions || []
+          // Cache the result (limit cache size to 100 entries)
+          if (autocompleteCache.current.size > 100) {
+            const firstKey = autocompleteCache.current.keys().next().value
+            autocompleteCache.current.delete(firstKey)
+          }
+          autocompleteCache.current.set(cacheKey, suggestions)
+          setSuggestions(suggestions)
           setShowSuggestions(true)
         }
       } catch (err) {
-        console.error('Autocomplete error:', err)
+        if (err.name !== 'AbortError') {
+          console.error('Autocomplete error:', err)
+        }
       }
-    }, 150)
+    }, 250)
 
-    return () => clearTimeout(timer)
+    return () => {
+      clearTimeout(timer)
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort()
+      }
+    }
   }, [query])
 
   const handleSearch = useCallback(async (searchQuery) => {

@@ -112,6 +112,7 @@ SEARCH_EXECUTABLE = None
 SEMANTIC_SEARCH_EXECUTABLE = None
 NGRAM_INDEX = None
 DOC_METADATA = None
+AUTOCOMPLETE_INDEX = None  # Single-word autocomplete index loaded in memory
 
 def get_executables():
     """Find search executables."""
@@ -136,6 +137,18 @@ def load_ngram_index():
             return json.load(f)
     return None
 
+def load_autocomplete_index():
+    """Load single-word autocomplete index for fast in-memory lookups."""
+    script_dir = Path(__file__).parent.resolve()
+    backend_dir = script_dir.parent
+    indexes_dir = backend_dir / "indexes" / "embeddings"
+    autocomplete_file = indexes_dir / "autocomplete.json"
+
+    if autocomplete_file.exists():
+        with open(autocomplete_file, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return None
+
 def load_doc_metadata():
     """Load document metadata (titles, authors, abstracts)."""
     from mock_metadata import generate_metadata
@@ -155,7 +168,7 @@ def load_doc_metadata():
 @app.on_event("startup")
 async def startup_event():
     """Initialize on startup."""
-    global SEARCH_EXECUTABLE, SEMANTIC_SEARCH_EXECUTABLE, NGRAM_INDEX, DOC_METADATA
+    global SEARCH_EXECUTABLE, SEMANTIC_SEARCH_EXECUTABLE, NGRAM_INDEX, DOC_METADATA, AUTOCOMPLETE_INDEX
 
     exes = get_executables()
 
@@ -169,6 +182,13 @@ async def startup_event():
 
     if not SEARCH_EXECUTABLE and not SEMANTIC_SEARCH_EXECUTABLE:
         print("Warning: No search executables found!")
+
+    # Load single-word autocomplete index (fast in-memory lookups)
+    AUTOCOMPLETE_INDEX = load_autocomplete_index()
+    if AUTOCOMPLETE_INDEX:
+        print(f"Loaded autocomplete index with {len(AUTOCOMPLETE_INDEX)} prefixes")
+    else:
+        print("Warning: Autocomplete index not found. Will fallback to C++ subprocess.")
 
     # Load n-gram index for multi-word autocomplete
     NGRAM_INDEX = load_ngram_index()
@@ -529,7 +549,48 @@ def run_autocomplete(prefix: str) -> dict:
             "time_ms": 1  # Fast lookup from index
         }
 
-    # Single-word autocomplete using C++ executable
+    # Single-word autocomplete - use in-memory index (fast)
+    if AUTOCOMPLETE_INDEX:
+        suggestions = []
+
+        # Try 2-character prefix lookup (matches the index structure)
+        if len(prefix) >= 2:
+            prefix_key = prefix[:2]
+            if prefix_key in AUTOCOMPLETE_INDEX:
+                # Filter by full prefix match
+                for item in AUTOCOMPLETE_INDEX[prefix_key]:
+                    word = item.get("w", "")
+                    if word.startswith(prefix):
+                        suggestions.append({
+                            "word": word,
+                            "df": item.get("d", 0)
+                        })
+                        if len(suggestions) >= 5:
+                            break
+
+        # Also try 3-character prefix if available and we need more results
+        if len(suggestions) < 5 and len(prefix) >= 3:
+            prefix_key = prefix[:3]
+            if prefix_key in AUTOCOMPLETE_INDEX:
+                existing_words = {s["word"] for s in suggestions}
+                for item in AUTOCOMPLETE_INDEX[prefix_key]:
+                    word = item.get("w", "")
+                    if word.startswith(prefix) and word not in existing_words:
+                        suggestions.append({
+                            "word": word,
+                            "df": item.get("d", 0)
+                        })
+                        if len(suggestions) >= 5:
+                            break
+
+        return {
+            "success": True,
+            "prefix": prefix,
+            "suggestions": suggestions[:5],
+            "time_ms": 1  # Fast in-memory lookup
+        }
+
+    # Fallback to C++ subprocess (slower, only if index not loaded)
     if not SEMANTIC_SEARCH_EXECUTABLE:
         return {"success": False, "error": "Autocomplete not available", "prefix": prefix}
 
