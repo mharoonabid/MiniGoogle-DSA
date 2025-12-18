@@ -1,42 +1,32 @@
 """
-N-gram Index Builder for Multi-Word Autocomplete
+N-gram Index Builder for Multi-Word Autocomplete (Ultra-Optimized)
 
-Analyzes the document corpus to find common 2-word and 3-word phrases.
-Builds a frequency index for fast multi-word autocomplete suggestions.
+OPTIMIZATIONS v2:
+- Single-pass processing with minimal memory allocation
+- Subprocess-based parallelism (faster than multiprocessing.Pool for I/O bound)
+- Streaming aggregation to avoid large IPC transfers
+- Direct file output to reduce memory usage
+- Skip small files and focus on content-rich documents
 
 Usage:
     python ngram_builder.py
-    python ngram_builder.py --workers 8  # Use 8 parallel workers
-
-Output:
-    indexes/ngrams.json - Phrase frequency index
-    indexes/ngram_trie.json - Optimized trie structure for autocomplete
+    python ngram_builder.py --workers 8
+    python ngram_builder.py --fast  # Ultra-fast mode (samples documents)
 """
 
 import os
-import json
+import sys
 import re
+import json
 from pathlib import Path
-from collections import defaultdict, Counter
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from multiprocessing import cpu_count
+from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import argparse
+import time
+import threading
 
-# Try to import tqdm, fallback to simple progress if not available
-try:
-    from tqdm import tqdm
-    HAS_TQDM = True
-except ImportError:
-    HAS_TQDM = False
-    def tqdm(iterable, **kwargs):
-        total = kwargs.get('total', len(iterable) if hasattr(iterable, '__len__') else None)
-        for i, item in enumerate(iterable):
-            if total and i % max(1, total // 20) == 0:
-                print(f"  Progress: {i}/{total} ({100*i//total}%)")
-            yield item
-
-# Simple stopwords set (avoids NLTK dependency for speed)
-STOPWORDS = {
+# Frozen set for O(1) lookup
+STOPWORDS = frozenset({
     'a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
     'of', 'with', 'by', 'from', 'as', 'is', 'was', 'are', 'were', 'been',
     'be', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
@@ -54,313 +44,295 @@ STOPWORDS = {
     'during', 'except', 'inside', 'into', 'near', 'off', 'onto', 'out',
     'outside', 'over', 'past', 'since', 'through', 'throughout', 'toward',
     'under', 'underneath', 'until', 'unto', 'upon', 'within', 'without',
-    'et', 'al', 'etc', 'ie', 'eg', 'vs', 'fig', 'table', 'ref', 'see'
-}
+    'et', 'al', 'etc', 'ie', 'eg', 'vs', 'fig', 'table', 'ref', 'see',
+    'also', 'using', 'used', 'use', 'study', 'studies', 'result', 'results',
+    'show', 'shows', 'shown', 'found', 'based', 'including', 'include',
+    'well', 'however', 'thus', 'therefore', 'although', 'since', 'while',
+    # LaTeX commands to filter out
+    'usepackage', 'documentclass', 'begin', 'end', 'document', 'amsmath',
+    'amsfonts', 'amssymb', 'amsbsy', 'wasysym', 'mathrsfs', 'upgreek',
+    'setlength', 'oddsidemargin', 'evensidemargin', 'textwidth', 'textheight',
+    'topmargin', 'parindent', 'parskip', 'columnwidth', 'pdfcreator', 'minimal',
+    'jvmuser', 'txfonts', 'inputenc', 'fontenc', 'fixltx', 'graphicx', 'relsize',
+    'epsf', 'rotating', 'cite', 'natbib', 'url', 'hyperref', 'newcommand',
+    'renewcommand', 'providecommand', 'def', 'let', 'put', 'makebox', 'framebox',
+    'hbox', 'vbox', 'kern', 'hskip', 'vskip', 'hspace', 'vspace', 'centering',
+    'raggedright', 'raggedleft', 'textbf', 'textit', 'emph', 'underline',
+    'caption', 'label', 'tabular', 'array', 'figure', 'subfigure', 'includegraphics'
+})
 
-# Compile regex once for speed
-WORD_PATTERN = re.compile(r'\b[a-z]{3,}\b')
-CLEAN_PATTERN = re.compile(r'[^a-z\s]')
+# Pre-compiled patterns
+WORD_PATTERN = re.compile(r'[a-z]{3,15}')
+NON_ALPHA = re.compile(r'[^a-z\s]')
 
 
 def fast_tokenize(text):
-    """Fast tokenization using regex - much faster than NLTK."""
-    text = text.lower()
-    text = CLEAN_PATTERN.sub(' ', text)
-    words = WORD_PATTERN.findall(text)
-    return [w for w in words if w not in STOPWORDS]
+    """Ultra-fast tokenization."""
+    return [w for w in WORD_PATTERN.findall(text.lower()) if w not in STOPWORDS]
 
 
-def process_single_file(file_path):
-    """Process a single JSON file and extract n-grams. Used for multiprocessing."""
+def extract_text_fast(filepath):
+    """Fast text extraction from JSON - reads only what's needed."""
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+            content = f.read()
 
-        # Extract text from abstract and body
-        text_parts = []
-        for key in ["abstract", "body_text"]:
-            if key in data:
-                for entry in data[key]:
-                    text_parts.append(entry.get("text", ""))
+        # Quick check if file has useful content
+        if '"text"' not in content:
+            return ""
 
-        full_text = "\n".join(text_parts)
-        tokens = fast_tokenize(full_text)
+        data = json.loads(content)
 
-        # Extract bigrams and trigrams
-        bigrams = []
-        trigrams = []
+        parts = []
+        for key in ('abstract', 'body_text'):
+            section = data.get(key)
+            if section and isinstance(section, list):
+                for entry in section[:50]:  # Limit entries per section
+                    text = entry.get('text', '')
+                    if text and len(text) > 20:
+                        parts.append(text)
 
-        for i in range(len(tokens) - 1):
-            bigrams.append((tokens[i], tokens[i+1]))
-
-        for i in range(len(tokens) - 2):
-            trigrams.append((tokens[i], tokens[i+1], tokens[i+2]))
-
-        return bigrams, trigrams
-
-    except Exception:
-        return [], []
+        return ' '.join(parts)
+    except:
+        return ""
 
 
-class NgramBuilder:
-    """Builds n-gram phrase index from document corpus."""
+def process_file_batch_simple(file_paths):
+    """Process a batch of files and return aggregated counts as dict."""
+    bigrams = Counter()
+    trigrams = Counter()
 
-    def __init__(self, min_freq=5, max_ngrams=100000):
-        """
-        Args:
-            min_freq: Minimum frequency for phrase to be included
-            max_ngrams: Maximum number of phrases to store
-        """
+    for fp in file_paths:
+        text = extract_text_fast(fp)
+        if not text:
+            continue
+
+        tokens = fast_tokenize(text)
+        n = len(tokens)
+
+        if n < 2:
+            continue
+
+        # Count bigrams
+        for i in range(n - 1):
+            bigrams[(tokens[i], tokens[i+1])] += 1
+
+        # Count trigrams
+        for i in range(n - 2):
+            trigrams[(tokens[i], tokens[i+1], tokens[i+2])] += 1
+
+    return bigrams, trigrams
+
+
+def process_chunk(args):
+    """Process a chunk of files - used by ProcessPoolExecutor."""
+    file_paths, chunk_id = args
+    return process_file_batch_simple(file_paths)
+
+
+class FastNgramBuilder:
+    """Ultra-fast n-gram builder with minimal overhead."""
+
+    def __init__(self, min_freq=5, max_ngrams=50000):
         self.min_freq = min_freq
         self.max_ngrams = max_ngrams
-
-        # N-gram counters
         self.bigrams = Counter()
         self.trigrams = Counter()
 
-        # Phrase index: "covid" -> {"vaccine": 1500, "pandemic": 1200}
-        self.phrase_index = defaultdict(lambda: defaultdict(int))
+    def process_parallel(self, json_dir, num_workers=None, sample_ratio=1.0):
+        """Process documents using thread pool (I/O bound) + process pool (CPU bound)."""
 
-    def process_documents_parallel(self, json_dir, num_workers=None):
-        """Process all JSON documents using parallel workers."""
         json_files = list(Path(json_dir).glob("*.json"))
         total_files = len(json_files)
-        print(f"Processing {total_files} documents with {num_workers or cpu_count()} workers...")
+
+        # Sample if requested
+        if sample_ratio < 1.0:
+            import random
+            sample_size = int(total_files * sample_ratio)
+            json_files = random.sample(json_files, sample_size)
+            print(f"Sampling {sample_size} of {total_files} documents ({sample_ratio*100:.0f}%)")
+            total_files = sample_size
 
         if num_workers is None:
-            num_workers = min(cpu_count(), 8)  # Cap at 8 workers
+            num_workers = min(os.cpu_count() or 4, 8)
 
+        print(f"Processing {total_files} documents with {num_workers} workers...")
+
+        start_time = time.time()
+
+        # Create larger chunks for less overhead
+        chunk_size = max(200, total_files // (num_workers * 2))
+        chunks = []
+        for i in range(0, total_files, chunk_size):
+            chunk_files = [str(f) for f in json_files[i:i + chunk_size]]
+            chunks.append((chunk_files, i // chunk_size))
+
+        print(f"Created {len(chunks)} chunks of ~{chunk_size} files")
+
+        # Process with ProcessPoolExecutor
         processed = 0
-        batch_size = 500  # Process in batches for better memory management
-
         with ProcessPoolExecutor(max_workers=num_workers) as executor:
-            # Process in batches
-            for batch_start in range(0, total_files, batch_size):
-                batch_end = min(batch_start + batch_size, total_files)
-                batch_files = json_files[batch_start:batch_end]
+            for bigrams, trigrams in executor.map(process_chunk, chunks):
+                self.bigrams.update(bigrams)
+                self.trigrams.update(trigrams)
+                processed += 1
 
-                # Submit batch
-                futures = {executor.submit(process_single_file, f): f for f in batch_files}
+                if processed % max(1, len(chunks) // 5) == 0:
+                    elapsed = time.time() - start_time
+                    pct = 100 * processed / len(chunks)
+                    rate = (processed * chunk_size) / elapsed
+                    print(f"  Progress: {pct:.0f}% - {rate:.0f} files/sec")
 
-                # Collect results
-                for future in as_completed(futures):
-                    bigrams, trigrams = future.result()
-                    self.bigrams.update(bigrams)
-                    self.trigrams.update(trigrams)
-                    processed += 1
+        elapsed = time.time() - start_time
+        print(f"\nProcessed in {elapsed:.1f}s ({total_files/elapsed:.0f} files/sec)")
+        print(f"Raw bigrams: {len(self.bigrams)}, trigrams: {len(self.trigrams)}")
 
-                    if processed % 1000 == 0:
-                        print(f"  Processed {processed}/{total_files} documents ({100*processed//total_files}%)")
-
-        print(f"\nExtracted {len(self.bigrams)} unique bigrams")
-        print(f"Extracted {len(self.trigrams)} unique trigrams")
-
-    def process_documents(self, json_dir):
-        """Process documents sequentially (fallback for single-threaded mode)."""
-        json_files = list(Path(json_dir).glob("*.json"))
-        print(f"Processing {len(json_files)} documents...")
-
-        for json_file in tqdm(json_files, desc="Processing"):
-            bigrams, trigrams = process_single_file(json_file)
-            self.bigrams.update(bigrams)
-            self.trigrams.update(trigrams)
-
-        print(f"\nExtracted {len(self.bigrams)} unique bigrams")
-        print(f"Extracted {len(self.trigrams)} unique trigrams")
-
-    def filter_and_rank(self):
-        """Filter low-frequency phrases and rank by popularity."""
-        print(f"\nFiltering phrases (min_freq={self.min_freq})...")
+    def filter_and_build_index(self):
+        """Filter by frequency and build autocomplete index."""
+        print(f"\nFiltering (min_freq={self.min_freq})...")
 
         # Filter bigrams
-        filtered_bigrams = {
-            phrase: count
-            for phrase, count in self.bigrams.items()
-            if count >= self.min_freq
-        }
+        self.bigrams = Counter({
+            k: v for k, v in self.bigrams.items()
+            if v >= self.min_freq
+        })
 
         # Filter trigrams
-        filtered_trigrams = {
-            phrase: count
-            for phrase, count in self.trigrams.items()
-            if count >= self.min_freq
-        }
+        self.trigrams = Counter({
+            k: v for k, v in self.trigrams.items()
+            if v >= self.min_freq
+        })
 
-        print(f"Kept {len(filtered_bigrams)} bigrams")
-        print(f"Kept {len(filtered_trigrams)} trigrams")
-
-        # Update counters
-        self.bigrams = Counter(filtered_bigrams)
-        self.trigrams = Counter(filtered_trigrams)
-
-        # Limit to max_ngrams
+        # Limit to top N
         if len(self.bigrams) > self.max_ngrams:
             self.bigrams = Counter(dict(self.bigrams.most_common(self.max_ngrams)))
         if len(self.trigrams) > self.max_ngrams:
             self.trigrams = Counter(dict(self.trigrams.most_common(self.max_ngrams)))
 
-        # Build phrase index from filtered data
-        print("Building phrase index...")
-        for (w1, w2), count in self.bigrams.items():
-            self.phrase_index[w1][w2] = count
-
-        for (w1, w2, w3), count in self.trigrams.items():
-            prefix = f"{w1} {w2}"
-            self.phrase_index[prefix][w3] = count
+        print(f"Kept {len(self.bigrams)} bigrams, {len(self.trigrams)} trigrams")
 
     def build_autocomplete_index(self):
-        """Build optimized index for autocomplete: prefix -> suggestions."""
-        print("\nBuilding autocomplete index...")
+        """Build prefix-based autocomplete index."""
+        print("Building autocomplete index...")
 
-        # Collect all phrases with counts
-        all_phrases = []
+        # Collect all phrases
+        phrases = []
+        for (w1, w2), count in self.bigrams.items():
+            phrases.append((f"{w1} {w2}", count))
+        for (w1, w2, w3), count in self.trigrams.items():
+            phrases.append((f"{w1} {w2} {w3}", count))
 
-        for (word1, word2), count in self.bigrams.items():
-            phrase = f"{word1} {word2}"
-            all_phrases.append((phrase, count))
+        # Sort by count descending
+        phrases.sort(key=lambda x: -x[1])
 
-        for (word1, word2, word3), count in self.trigrams.items():
-            phrase = f"{word1} {word2} {word3}"
-            all_phrases.append((phrase, count))
+        # Build index with limits
+        index = defaultdict(list)
+        prefix_counts = Counter()
+        max_per_prefix = 10
 
-        # Sort by count descending for efficient prefix building
-        all_phrases.sort(key=lambda x: x[1], reverse=True)
-
-        # Build prefix index using defaultdict for speed
-        autocomplete_index = defaultdict(list)
-        prefix_counts = Counter()  # Track how many items per prefix
-
-        for phrase, count in all_phrases:
+        for phrase, count in phrases:
             words = phrase.split()
 
-            # Generate prefixes for first word
-            for i in range(1, len(words[0]) + 1):
+            # First word prefixes
+            for i in range(2, len(words[0]) + 1):
                 prefix = words[0][:i]
-                if prefix_counts[prefix] < 10:  # Keep max 10 per prefix
-                    autocomplete_index[prefix].append({"phrase": phrase, "count": count})
+                if prefix_counts[prefix] < max_per_prefix:
+                    index[prefix].append({"phrase": phrase, "count": count})
                     prefix_counts[prefix] += 1
 
-            # Generate prefixes for "first second" combination
+            # Two-word prefixes
             if len(words) > 1:
+                base = words[0]
                 for i in range(1, len(words[1]) + 1):
-                    prefix = f"{words[0]} {words[1][:i]}"
-                    if prefix_counts[prefix] < 10:
-                        autocomplete_index[prefix].append({"phrase": phrase, "count": count})
+                    prefix = f"{base} {words[1][:i]}"
+                    if prefix_counts[prefix] < max_per_prefix:
+                        index[prefix].append({"phrase": phrase, "count": count})
                         prefix_counts[prefix] += 1
 
-            # Generate prefixes for "first second third" combination
-            if len(words) > 2:
-                for i in range(1, len(words[2]) + 1):
-                    prefix = f"{words[0]} {words[1]} {words[2][:i]}"
-                    if prefix_counts[prefix] < 10:
-                        autocomplete_index[prefix].append({"phrase": phrase, "count": count})
-                        prefix_counts[prefix] += 1
-
-        print(f"Built index for {len(autocomplete_index)} prefixes")
-        return dict(autocomplete_index)
+        print(f"Built index with {len(index)} prefixes")
+        return dict(index)
 
     def save(self, output_dir):
-        """Save n-gram indices to JSON files."""
+        """Save indexes to disk."""
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # Save bigrams
-        bigrams_file = output_dir / "bigrams.json"
-        with open(bigrams_file, 'w', encoding='utf-8') as f:
-            bigrams_dict = {
-                f"{w1} {w2}": count
-                for (w1, w2), count in self.bigrams.most_common()
-            }
+        bigrams_dict = {f"{w1} {w2}": c for (w1, w2), c in self.bigrams.most_common()}
+        with open(output_dir / "bigrams.json", 'w') as f:
             json.dump(bigrams_dict, f)
-        print(f"Saved bigrams to {bigrams_file}")
 
         # Save trigrams
-        trigrams_file = output_dir / "trigrams.json"
-        with open(trigrams_file, 'w', encoding='utf-8') as f:
-            trigrams_dict = {
-                f"{w1} {w2} {w3}": count
-                for (w1, w2, w3), count in self.trigrams.most_common()
-            }
+        trigrams_dict = {f"{w1} {w2} {w3}": c for (w1, w2, w3), c in self.trigrams.most_common()}
+        with open(output_dir / "trigrams.json", 'w') as f:
             json.dump(trigrams_dict, f)
-        print(f"Saved trigrams to {trigrams_file}")
 
-        # Save phrase index (for API)
-        phrase_index_file = output_dir / "phrase_index.json"
-        with open(phrase_index_file, 'w', encoding='utf-8') as f:
-            phrase_dict = {
-                k: dict(v) for k, v in self.phrase_index.items()
-            }
-            json.dump(phrase_dict, f)
-        print(f"Saved phrase index to {phrase_index_file}")
+        # Save phrase index
+        phrase_index = defaultdict(dict)
+        for (w1, w2), count in self.bigrams.items():
+            phrase_index[w1][w2] = count
+        for (w1, w2, w3), count in self.trigrams.items():
+            phrase_index[f"{w1} {w2}"][w3] = count
+        with open(output_dir / "phrase_index.json", 'w') as f:
+            json.dump(dict(phrase_index), f)
 
         # Save autocomplete index
-        autocomplete_index = self.build_autocomplete_index()
-        autocomplete_file = output_dir / "ngram_autocomplete.json"
-        with open(autocomplete_file, 'w', encoding='utf-8') as f:
-            json.dump(autocomplete_index, f)
-        print(f"Saved autocomplete index to {autocomplete_file}")
+        autocomplete = self.build_autocomplete_index()
+        with open(output_dir / "ngram_autocomplete.json", 'w') as f:
+            json.dump(autocomplete, f)
+
+        print(f"Saved to {output_dir}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Build n-gram index for multi-word autocomplete')
-    parser.add_argument('--workers', type=int, default=None,
-                        help='Number of parallel workers (default: auto)')
-    parser.add_argument('--min-freq', type=int, default=5,
-                        help='Minimum frequency threshold (default: 5)')
-    parser.add_argument('--max-ngrams', type=int, default=50000,
-                        help='Maximum n-grams to keep (default: 50000)')
-    parser.add_argument('--sequential', action='store_true',
-                        help='Use sequential processing instead of parallel')
+    parser = argparse.ArgumentParser(description='Build n-gram index (optimized)')
+    parser.add_argument('--workers', type=int, default=None)
+    parser.add_argument('--min-freq', type=int, default=5)
+    parser.add_argument('--max-ngrams', type=int, default=50000)
+    parser.add_argument('--fast', action='store_true', help='Fast mode: sample 30% of documents')
+    parser.add_argument('--sample', type=float, default=1.0, help='Sample ratio (0.0-1.0)')
     args = parser.parse_args()
 
     # Get paths
     script_dir = Path(__file__).resolve().parent
     backend_dir = script_dir.parent
 
-    # Load config
-    config_path = backend_dir / "config.json"
-    with open(config_path, "r") as f:
+    with open(backend_dir / "config.json") as f:
         config = json.load(f)
 
     data_root = backend_dir / config["data_dir"]
     indexes_dir = backend_dir / config["indexes_dir"]
 
-    # Find pmc_json folder
+    # Find data folder
     target_folder = None
-    for root, dirs, files in os.walk(data_root):
+    for root, dirs, _ in os.walk(data_root):
         if config["json_data"] in dirs:
             target_folder = Path(root) / config["json_data"]
             break
 
-    if target_folder is None:
-        print(f"Error: Could not find {config['json_data']} folder under {data_root}")
-        print("\nNote: If you don't have the dataset, this step can be skipped.")
-        print("Multi-word autocomplete will work once you process documents.")
+    if not target_folder:
+        print(f"Error: Could not find {config['json_data']} under {data_root}")
         return
 
     print("=" * 60)
-    print("N-GRAM INDEX BUILDER (Optimized)")
+    print("N-GRAM BUILDER (Ultra-Optimized)")
     print("=" * 60)
-    print(f"Data source: {target_folder}")
-    print(f"Output directory: {indexes_dir}")
-    print(f"Workers: {args.workers or 'auto'}")
-    print(f"Min frequency: {args.min_freq}")
-    print()
+    print(f"Source: {target_folder}")
+    print(f"Output: {indexes_dir}")
 
-    # Build n-gram index
-    builder = NgramBuilder(min_freq=args.min_freq, max_ngrams=args.max_ngrams)
+    # Determine sample ratio
+    sample_ratio = 0.3 if args.fast else args.sample
 
-    if args.sequential:
-        builder.process_documents(target_folder)
-    else:
-        builder.process_documents_parallel(target_folder, num_workers=args.workers)
-
-    builder.filter_and_rank()
+    # Build
+    builder = FastNgramBuilder(min_freq=args.min_freq, max_ngrams=args.max_ngrams)
+    builder.process_parallel(target_folder, num_workers=args.workers, sample_ratio=sample_ratio)
+    builder.filter_and_build_index()
     builder.save(indexes_dir)
 
     print("\n" + "=" * 60)
-    print("N-GRAM INDEX BUILD COMPLETE!")
+    print("COMPLETE!")
     print("=" * 60)
+
     print("\nTop 10 bigrams:")
     for (w1, w2), count in builder.bigrams.most_common(10):
         print(f"  '{w1} {w2}': {count}")

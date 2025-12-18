@@ -548,9 +548,15 @@ void initializeCache(const fs::path& backendDir, const json& config) {
         g_cache.barrelLookup[std::stoi(key)] = val.get<int>();
     }
 
-    // Load binary barrel indices
-    for (int barrelId = 0; barrelId < 10; barrelId++) {
-        fs::path idxPath = binaryBarrelsDir / ("barrel_" + std::to_string(barrelId) + ".idx");
+    // Load binary barrel indices (0-9 and new_docs)
+    std::vector<std::pair<int, std::string>> barrelInfos;
+    for (int i = 0; i < 10; i++) {
+        barrelInfos.push_back({i, std::to_string(i)});
+    }
+    barrelInfos.push_back({10, "new_docs"});  // Add new_docs barrel
+
+    for (const auto& [barrelId, barrelName] : barrelInfos) {
+        fs::path idxPath = binaryBarrelsDir / ("barrel_" + barrelName + ".idx");
 
         if (!fs::exists(idxPath)) continue;
 
@@ -639,7 +645,9 @@ bool findPostingsBinary(
     IndexEntry entry = offsetIt->second;
 
     fs::path indexesDir = g_cache.backendDir / config["indexes_dir"].get<std::string>();
-    fs::path binPath = indexesDir / "barrels_binary" / ("barrel_" + std::to_string(barrelIdOut) + ".bin");
+    // Handle barrel 10 (new_docs) naming
+    std::string barrelFileName = (barrelIdOut == 10) ? "barrel_new_docs.bin" : ("barrel_" + std::to_string(barrelIdOut) + ".bin");
+    fs::path binPath = indexesDir / "barrels_binary" / barrelFileName;
 
     std::ifstream binFile(binPath, std::ios::binary);
     if (!binFile.is_open()) {
@@ -679,6 +687,60 @@ bool findPostingsBinary(
     }
 
     binFile.close();
+
+    // ALSO check barrel 10 (new_docs) for newly indexed documents
+    // This ensures newly uploaded documents are immediately searchable
+    if (barrelIdOut != 10) {
+        auto& newDocsIdx = g_cache.barrelIndices[10];
+        auto newDocsIt = newDocsIdx.find(lemmaId);
+        if (newDocsIt != newDocsIdx.end()) {
+            IndexEntry newEntry = newDocsIt->second;
+
+            fs::path newDocsBinPath = indexesDir / "barrels_binary" / "barrel_new_docs.bin";
+            std::ifstream newDocsFile(newDocsBinPath, std::ios::binary);
+            if (newDocsFile.is_open()) {
+                newDocsFile.seekg(newEntry.offset);
+
+                int32_t newReadLemmaId, newDf, newNumDocs;
+                newDocsFile.read(reinterpret_cast<char*>(&newReadLemmaId), sizeof(newReadLemmaId));
+                newDocsFile.read(reinterpret_cast<char*>(&newDf), sizeof(newDf));
+                newDocsFile.read(reinterpret_cast<char*>(&newNumDocs), sizeof(newNumDocs));
+
+                // Collect existing doc IDs
+                std::unordered_set<std::string> existingDocs;
+                for (const auto& p : postingsOut) {
+                    existingDocs.insert(p.docId);
+                }
+
+                // Read and merge new postings
+                for (int i = 0; i < newNumDocs; i++) {
+                    char docIdBuf[DOC_ID_SIZE];
+                    int32_t tf;
+
+                    newDocsFile.read(docIdBuf, DOC_ID_SIZE);
+                    newDocsFile.read(reinterpret_cast<char*>(&tf), sizeof(tf));
+
+                    std::string docId(docIdBuf);
+                    size_t nullPos = docId.find('\0');
+                    if (nullPos != std::string::npos) {
+                        docId = docId.substr(0, nullPos);
+                    }
+
+                    if (existingDocs.find(docId) == existingDocs.end()) {
+                        DocPosting dp;
+                        dp.docId = docId;
+                        dp.tf = tf;
+                        dp.score = 0.0;
+                        postingsOut.push_back(dp);
+                        dfOut++;
+                    }
+                }
+
+                newDocsFile.close();
+            }
+        }
+    }
+
     return true;
 }
 

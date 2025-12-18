@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Optional, List
 from enum import Enum
 
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -89,6 +89,23 @@ class SimilarWordsResponse(BaseModel):
 class QueryMode(str, Enum):
     AND = "and"
     OR = "or"
+
+class DocumentUploadResponse(BaseModel):
+    success: bool
+    doc_id: Optional[str] = None
+    title: Optional[str] = None
+    total_terms: Optional[int] = None
+    unique_terms: Optional[int] = None
+    new_terms_added: Optional[int] = None
+    indexing_time_ms: Optional[int] = None
+    error: Optional[str] = None
+
+class DocumentTextRequest(BaseModel):
+    title: str = ""
+    abstract: str = ""
+    body: str = ""
+    authors: Optional[List[str]] = None
+    doc_id: Optional[str] = None
 
 # ==================== FastAPI App ====================
 
@@ -513,54 +530,130 @@ def run_basic_search(query: str, mode: str = "and") -> dict:
 
 def run_autocomplete(prefix: str) -> dict:
     """Get autocomplete suggestions with multi-word support."""
-    prefix = prefix.strip().lower()
+    original_prefix = prefix.lower()
+    prefix_stripped = original_prefix.strip()
+    has_trailing_space = original_prefix.endswith(' ')
 
-    # Check if prefix contains spaces (multi-word)
-    if ' ' in prefix and NGRAM_INDEX:
-        # Multi-word autocomplete using n-gram index
+    # Check if this is a multi-word query
+    words = prefix_stripped.split()
+    is_multi_word = len(words) > 1 or (len(words) == 1 and has_trailing_space)
+
+    if is_multi_word:
+        # For multi-word queries, we have two approaches:
+        # 1. Try n-gram index for phrase completions
+        # 2. Fall back to single-word completion for the last word
+
         suggestions = []
+        seen = set()
 
-        # Look up exact prefix match
-        if prefix in NGRAM_INDEX:
-            for item in NGRAM_INDEX[prefix]:
-                suggestions.append({
-                    "word": item["phrase"],
-                    "df": item["count"]
-                })
+        # First try n-gram index for phrase completions
+        if NGRAM_INDEX:
+            # Case 1: Direct lookup (e.g., "covid v" -> look up "covid v")
+            if prefix_stripped in NGRAM_INDEX:
+                for item in NGRAM_INDEX[prefix_stripped]:
+                    phrase = item["phrase"]
+                    if phrase not in seen:
+                        suggestions.append({"word": phrase, "df": item["count"]})
+                        seen.add(phrase)
 
-        # If no exact match, try partial match on last word
-        if not suggestions:
-            words = prefix.split()
-            # Try progressively shorter prefixes
-            for i in range(len(prefix), len(words[0]), -1):
-                test_prefix = prefix[:i]
-                if test_prefix in NGRAM_INDEX:
-                    for item in NGRAM_INDEX[test_prefix]:
+            # Case 2: User typed trailing space (e.g., "covid " -> look up "covid")
+            if not suggestions and has_trailing_space:
+                first_word = prefix_stripped
+                if first_word in NGRAM_INDEX:
+                    for item in NGRAM_INDEX[first_word]:
+                        phrase = item["phrase"]
+                        if phrase != first_word and phrase not in seen:
+                            suggestions.append({"word": phrase, "df": item["count"]})
+                            seen.add(phrase)
+
+            # Case 3: Try partial match on first word
+            if not suggestions and len(words) >= 1:
+                first_word = words[0]
+                if first_word in NGRAM_INDEX:
+                    for item in NGRAM_INDEX[first_word]:
+                        phrase = item["phrase"]
+                        if phrase.startswith(prefix_stripped) and phrase not in seen:
+                            suggestions.append({"word": phrase, "df": item["count"]})
+                            seen.add(phrase)
+
+        # If n-gram didn't find anything, fall back to single-word completion for last word
+        if not suggestions and AUTOCOMPLETE_INDEX:
+            # Extract prefix of previous words and the current word being typed
+            if has_trailing_space:
+                # User just typed space, waiting for next word
+                prev_words = prefix_stripped
+                current_word_prefix = ""
+            else:
+                # User is typing a word
+                prev_words = " ".join(words[:-1])
+                current_word_prefix = words[-1]
+
+            # Get suggestions for the current word
+            if current_word_prefix and len(current_word_prefix) >= 1:
+                word_suggestions = []
+
+                # Try 2-character prefix lookup
+                if len(current_word_prefix) >= 2:
+                    prefix_key = current_word_prefix[:2]
+                    if prefix_key in AUTOCOMPLETE_INDEX:
+                        for item in AUTOCOMPLETE_INDEX[prefix_key]:
+                            word = item.get("w", "")
+                            if word.startswith(current_word_prefix):
+                                word_suggestions.append({
+                                    "word": word,
+                                    "df": item.get("d", 0)
+                                })
+                                if len(word_suggestions) >= 5:
+                                    break
+
+                # Also try single character if we have few results
+                if len(word_suggestions) < 5 and len(current_word_prefix) >= 1:
+                    prefix_key = current_word_prefix[:2] if len(current_word_prefix) >= 2 else current_word_prefix[0]
+                    # Try 3-char prefix
+                    if len(current_word_prefix) >= 3:
+                        prefix_key = current_word_prefix[:3]
+                        if prefix_key in AUTOCOMPLETE_INDEX:
+                            existing = {s["word"] for s in word_suggestions}
+                            for item in AUTOCOMPLETE_INDEX[prefix_key]:
+                                word = item.get("w", "")
+                                if word.startswith(current_word_prefix) and word not in existing:
+                                    word_suggestions.append({
+                                        "word": word,
+                                        "df": item.get("d", 0)
+                                    })
+                                    if len(word_suggestions) >= 5:
+                                        break
+
+                # Prepend previous words to each suggestion
+                for ws in word_suggestions:
+                    full_phrase = f"{prev_words} {ws['word']}" if prev_words else ws['word']
+                    if full_phrase not in seen:
                         suggestions.append({
-                            "word": item["phrase"],
-                            "df": item["count"]
+                            "word": full_phrase,
+                            "df": ws["df"]
                         })
-                    break
+                        seen.add(full_phrase)
 
-        return {
-            "success": True,
-            "prefix": prefix,
-            "suggestions": suggestions[:5],
-            "time_ms": 1  # Fast lookup from index
-        }
+        if suggestions:
+            return {
+                "success": True,
+                "prefix": original_prefix,
+                "suggestions": suggestions[:5],
+                "time_ms": 1
+            }
 
     # Single-word autocomplete - use in-memory index (fast)
     if AUTOCOMPLETE_INDEX:
         suggestions = []
 
         # Try 2-character prefix lookup (matches the index structure)
-        if len(prefix) >= 2:
-            prefix_key = prefix[:2]
+        if len(prefix_stripped) >= 2:
+            prefix_key = prefix_stripped[:2]
             if prefix_key in AUTOCOMPLETE_INDEX:
                 # Filter by full prefix match
                 for item in AUTOCOMPLETE_INDEX[prefix_key]:
                     word = item.get("w", "")
-                    if word.startswith(prefix):
+                    if word.startswith(prefix_stripped):
                         suggestions.append({
                             "word": word,
                             "df": item.get("d", 0)
@@ -569,13 +662,13 @@ def run_autocomplete(prefix: str) -> dict:
                             break
 
         # Also try 3-character prefix if available and we need more results
-        if len(suggestions) < 5 and len(prefix) >= 3:
-            prefix_key = prefix[:3]
+        if len(suggestions) < 5 and len(prefix_stripped) >= 3:
+            prefix_key = prefix_stripped[:3]
             if prefix_key in AUTOCOMPLETE_INDEX:
                 existing_words = {s["word"] for s in suggestions}
                 for item in AUTOCOMPLETE_INDEX[prefix_key]:
                     word = item.get("w", "")
-                    if word.startswith(prefix) and word not in existing_words:
+                    if word.startswith(prefix_stripped) and word not in existing_words:
                         suggestions.append({
                             "word": word,
                             "df": item.get("d", 0)
@@ -585,31 +678,31 @@ def run_autocomplete(prefix: str) -> dict:
 
         return {
             "success": True,
-            "prefix": prefix,
+            "prefix": original_prefix,
             "suggestions": suggestions[:5],
             "time_ms": 1  # Fast in-memory lookup
         }
 
     # Fallback to C++ subprocess (slower, only if index not loaded)
     if not SEMANTIC_SEARCH_EXECUTABLE:
-        return {"success": False, "error": "Autocomplete not available", "prefix": prefix}
+        return {"success": False, "error": "Autocomplete not available", "prefix": original_prefix}
 
-    cmd = [SEMANTIC_SEARCH_EXECUTABLE, "--autocomplete", prefix]
+    cmd = [SEMANTIC_SEARCH_EXECUTABLE, "--autocomplete", prefix_stripped]
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
 
         if result.returncode != 0:
-            return {"success": False, "error": result.stderr or "Failed", "prefix": prefix}
+            return {"success": False, "error": result.stderr or "Failed", "prefix": original_prefix}
 
         parsed = parse_autocomplete_output(result.stdout)
         parsed["success"] = True
-        parsed["prefix"] = prefix
+        parsed["prefix"] = original_prefix
 
         return parsed
 
     except Exception as e:
-        return {"success": False, "error": str(e), "prefix": prefix}
+        return {"success": False, "error": str(e), "prefix": original_prefix}
 
 def run_similar(word: str) -> dict:
     """Find similar words."""
@@ -718,9 +811,189 @@ async def root():
             "/search": "Search with semantic expansion and PageRank",
             "/autocomplete": "Get autocomplete suggestions",
             "/similar": "Find semantically similar words",
-            "/health": "Health check"
+            "/health": "Health check",
+            "/upload": "Upload and index a new document (POST)",
+            "/upload/text": "Index a document from text (POST)"
         }
     }
+
+# ==================== Document Upload Endpoints ====================
+
+# Lazy load document indexer to avoid startup delay
+_document_indexer = None
+
+def get_document_indexer():
+    """Get or create document indexer instance."""
+    global _document_indexer
+    if _document_indexer is None:
+        try:
+            from document_indexer import DocumentIndexer
+            _document_indexer = DocumentIndexer()
+            print("Document indexer initialized")
+        except Exception as e:
+            print(f"Failed to initialize document indexer: {e}")
+            return None
+    return _document_indexer
+
+@app.post("/upload", response_model=DocumentUploadResponse, tags=["Upload"])
+async def upload_document(
+    file: UploadFile = File(..., description="Document file (txt, json, md)"),
+    title: Optional[str] = Form(None, description="Document title (optional, extracted from file if not provided)"),
+    authors: Optional[str] = Form(None, description="Comma-separated list of authors")
+):
+    """
+    Upload and index a new document.
+
+    Supports file formats:
+    - .txt - Plain text (first line used as title)
+    - .json - JSON with title, abstract, body_text fields
+    - .md - Markdown (first heading used as title)
+
+    The document will be indexed and immediately searchable.
+    Indexing typically takes less than 1 second.
+    """
+    indexer = get_document_indexer()
+    if indexer is None:
+        return DocumentUploadResponse(
+            success=False,
+            error="Document indexer not initialized. Please ensure all dependencies are installed."
+        )
+
+    # Validate file
+    if not file or not file.filename:
+        return DocumentUploadResponse(
+            success=False,
+            error="No file provided"
+        )
+
+    # Read file content
+    try:
+        content = await file.read()
+        if not content:
+            return DocumentUploadResponse(
+                success=False,
+                error="File is empty"
+            )
+    except Exception as e:
+        return DocumentUploadResponse(
+            success=False,
+            error=f"Failed to read file: {str(e)}"
+        )
+
+    # Determine file type
+    file_type = file.filename.split('.')[-1].lower() if '.' in file.filename else 'txt'
+    
+    # Validate file type
+    allowed_types = ['txt', 'json', 'md', 'text']
+    if file_type not in allowed_types:
+        return DocumentUploadResponse(
+            success=False,
+            error=f"Unsupported file type: .{file_type}. Allowed types: {', '.join(allowed_types)}"
+        )
+
+    # Parse authors
+    author_list = []
+    if authors:
+        author_list = [a.strip() for a in authors.split(',') if a.strip()]
+
+    # Index the document
+    try:
+        result = indexer.index_document(
+            title=title or "",
+            authors=author_list,
+            file_content=content,
+            file_type=file_type
+        )
+
+        if result["success"]:
+            # Reload metadata in memory
+            global DOC_METADATA
+            DOC_METADATA = load_doc_metadata()
+
+            return DocumentUploadResponse(
+                success=True,
+                doc_id=result["doc_id"],
+                title=result.get("title", ""),
+                total_terms=result.get("total_terms", 0),
+                unique_terms=result.get("unique_terms", 0),
+                new_terms_added=result.get("new_terms_added", 0),
+                indexing_time_ms=result.get("indexing_time_ms", 0)
+            )
+        else:
+            return DocumentUploadResponse(
+                success=False,
+                error=result.get("error", "Indexing failed")
+            )
+
+    except Exception as e:
+        import traceback
+        error_detail = f"Indexing error: {str(e)}"
+        print(f"Upload error: {error_detail}")
+        print(traceback.format_exc())
+        return DocumentUploadResponse(
+            success=False,
+            error=error_detail
+        )
+
+@app.post("/upload/text", response_model=DocumentUploadResponse, tags=["Upload"])
+async def upload_document_text(doc: DocumentTextRequest):
+    """
+    Index a document from text content.
+
+    Provide title, abstract, and/or body text directly.
+    At least one text field must be non-empty.
+    """
+    indexer = get_document_indexer()
+    if indexer is None:
+        return DocumentUploadResponse(
+            success=False,
+            error="Document indexer not initialized. Please ensure all dependencies are installed."
+        )
+
+    if not doc.title and not doc.abstract and not doc.body:
+        return DocumentUploadResponse(
+            success=False,
+            error="At least one of title, abstract, or body must be provided"
+        )
+
+    try:
+        result = indexer.index_document(
+            doc_id=doc.doc_id,
+            title=doc.title,
+            abstract=doc.abstract,
+            body=doc.body,
+            authors=doc.authors
+        )
+
+        if result["success"]:
+            # Reload metadata
+            global DOC_METADATA
+            DOC_METADATA = load_doc_metadata()
+
+            return DocumentUploadResponse(
+                success=True,
+                doc_id=result["doc_id"],
+                title=result.get("title", ""),
+                total_terms=result.get("total_terms", 0),
+                unique_terms=result.get("unique_terms", 0),
+                new_terms_added=result.get("new_terms_added", 0),
+                indexing_time_ms=result.get("indexing_time_ms", 0)
+            )
+        else:
+            return DocumentUploadResponse(
+                success=False,
+                error=result.get("error", "Indexing failed")
+            )
+
+    except Exception as e:
+        import traceback
+        error_detail = f"Indexing error: {str(e)}"
+        print(f"Upload text error: {error_detail}")
+        print(traceback.format_exc())
+        return DocumentUploadResponse(
+            success=False,
+            error=error_detail
+        )
 
 # ==================== Main ====================
 

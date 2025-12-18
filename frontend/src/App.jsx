@@ -17,19 +17,27 @@ function App() {
   const searchInputRef = useRef(null)
   const suggestionsRef = useRef(null)
 
+  // Document upload state
+  const [showUpload, setShowUpload] = useState(false)
+  const [uploadLoading, setUploadLoading] = useState(false)
+  const [uploadResult, setUploadResult] = useState(null)
+  const [uploadError, setUploadError] = useState(null)
+  const fileInputRef = useRef(null)
+
   // Cache for autocomplete results
   const autocompleteCache = useRef(new Map())
   const abortControllerRef = useRef(null)
+  const searchAbortRef = useRef(null)  // Abort controller for search requests
 
-  // Debounced autocomplete with request cancellation and caching
+  // Optimized autocomplete with minimal delay and aggressive caching
   useEffect(() => {
-    if (query.length < 2) {
+    if (query.length < 1) {
       setSuggestions([])
       setShowSuggestions(false)
       return
     }
 
-    // Check cache first
+    // Check cache first - instant response
     const cacheKey = query.toLowerCase()
     if (autocompleteCache.current.has(cacheKey)) {
       setSuggestions(autocompleteCache.current.get(cacheKey))
@@ -37,8 +45,9 @@ function App() {
       return
     }
 
+    // Minimal debounce (50ms) for near-instant feel
     const timer = setTimeout(async () => {
-      // Cancel any in-flight request
+      // Cancel any in-flight request immediately
       if (abortControllerRef.current) {
         abortControllerRef.current.abort()
       }
@@ -47,13 +56,17 @@ function App() {
       try {
         const res = await fetch(
           `${API_BASE}/autocomplete?prefix=${encodeURIComponent(query)}`,
-          { signal: abortControllerRef.current.signal }
+          {
+            signal: abortControllerRef.current.signal,
+            // Use keepalive for faster connection reuse
+            keepalive: true
+          }
         )
         if (res.ok) {
           const data = await res.json()
           const suggestions = data.suggestions || []
-          // Cache the result (limit cache size to 100 entries)
-          if (autocompleteCache.current.size > 100) {
+          // LRU cache with 200 entries for better hit rate
+          if (autocompleteCache.current.size > 200) {
             const firstKey = autocompleteCache.current.keys().next().value
             autocompleteCache.current.delete(firstKey)
           }
@@ -66,7 +79,7 @@ function App() {
           console.error('Autocomplete error:', err)
         }
       }
-    }, 250)
+    }, 50)
 
     return () => {
       clearTimeout(timer)
@@ -80,14 +93,25 @@ function App() {
     const q = searchQuery || query
     if (!q.trim()) return
 
+    // Cancel any pending search request immediately
+    if (searchAbortRef.current) {
+      searchAbortRef.current.abort()
+    }
+    searchAbortRef.current = new AbortController()
+
+    // Update UI state immediately (batch these updates)
+    setShowSuggestions(false)
     setLoading(true)
     setError(null)
-    setShowSuggestions(false)
-    setSuggestions([])
 
     try {
       const url = `${API_BASE}/search?q=${encodeURIComponent(q)}&mode=${mode}&semantic=${semantic}`
-      const res = await fetch(url)
+      const res = await fetch(url, {
+        signal: searchAbortRef.current.signal,
+        headers: {
+          'Accept': 'application/json',
+        }
+      })
 
       if (!res.ok) {
         const errData = await res.json()
@@ -98,8 +122,11 @@ function App() {
       setResults(data)
       setSearchTime(data.search_time_ms)
     } catch (err) {
-      setError(err.message)
-      setResults(null)
+      // Don't show error for aborted requests
+      if (err.name !== 'AbortError') {
+        setError(err.message)
+        setResults(null)
+      }
     } finally {
       setLoading(false)
     }
@@ -128,7 +155,10 @@ function App() {
           const selected = suggestions[selectedIndex]
           setQuery(selected.word)
           setShowSuggestions(false)
-          handleSearch(selected.word)
+          // Only auto-search for single words, let user confirm multi-word
+          if (!selected.word.includes(' ')) {
+            handleSearch(selected.word)
+          }
         } else {
           handleSearch()
         }
@@ -145,6 +175,42 @@ function App() {
     setShowSuggestions(false)
     handleSearch(word)
   }
+
+  // Handle document upload
+  const handleFileUpload = useCallback(async (e) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+
+    setUploadLoading(true)
+    setUploadError(null)
+    setUploadResult(null)
+
+    const formData = new FormData()
+    formData.append('file', file)
+
+    try {
+      const res = await fetch(`${API_BASE}/upload`, {
+        method: 'POST',
+        body: formData
+      })
+
+      const data = await res.json()
+
+      if (res.ok && data.success) {
+        setUploadResult(data)
+        // Clear the file input
+        if (fileInputRef.current) {
+          fileInputRef.current.value = ''
+        }
+      } else {
+        setUploadError(data.error || data.detail || 'Upload failed')
+      }
+    } catch (err) {
+      setUploadError(err.message || 'Upload failed')
+    } finally {
+      setUploadLoading(false)
+    }
+  }, [])
 
   // Close suggestions on outside click
   useEffect(() => {
@@ -179,10 +245,10 @@ function App() {
                 setSelectedIndex(-1)
               }}
               onKeyDown={handleKeyDown}
-              onFocus={() => query.length >= 2 && suggestions.length > 0 && setShowSuggestions(true)}
+              onFocus={() => query.length >= 1 && suggestions.length > 0 && setShowSuggestions(true)}
             />
             <button
-              className="search-button"
+              className={`search-button ${loading ? 'loading' : ''}`}
               onClick={() => handleSearch()}
               disabled={loading}
             >
@@ -224,8 +290,71 @@ function App() {
                 Semantic Search
               </label>
             </div>
+            <div className="option-group">
+              <button
+                className="upload-toggle-btn"
+                onClick={() => setShowUpload(!showUpload)}
+              >
+                {showUpload ? 'Hide Upload' : 'Add Document'}
+              </button>
+            </div>
           </div>
         </div>
+
+        {/* Document Upload Section */}
+        {showUpload && (
+          <div className="upload-section">
+            <h3 className="upload-title">Add New Document</h3>
+            <p className="upload-desc">Upload a document to index it instantly. Supports .txt, .json, .md files.</p>
+
+            <div className="upload-box">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".txt,.json,.md,.text"
+                onChange={handleFileUpload}
+                disabled={uploadLoading}
+                className="file-input"
+                id="file-upload"
+              />
+              <label htmlFor="file-upload" className="file-label">
+                {uploadLoading ? 'Indexing...' : 'Choose File or Drag & Drop'}
+              </label>
+            </div>
+
+            {uploadError && (
+              <div className="upload-error">
+                <strong>Error:</strong> {uploadError}
+              </div>
+            )}
+
+            {uploadResult && (
+              <div className="upload-success">
+                <strong>Document indexed successfully!</strong>
+                <ul className="upload-stats">
+                  <li>Document ID: <code>{uploadResult.doc_id}</code></li>
+                  <li>Title: {uploadResult.title || 'Untitled'}</li>
+                  <li>Terms indexed: {uploadResult.total_terms?.toLocaleString()}</li>
+                  <li>Unique terms: {uploadResult.unique_terms?.toLocaleString()}</li>
+                  {uploadResult.new_terms_added > 0 && (
+                    <li>New terms added: {uploadResult.new_terms_added}</li>
+                  )}
+                  <li>Indexing time: {uploadResult.indexing_time_ms}ms</li>
+                </ul>
+                <button
+                  className="search-indexed-btn"
+                  onClick={() => {
+                    setQuery(uploadResult.doc_id)
+                    setShowUpload(false)
+                    handleSearch(uploadResult.doc_id)
+                  }}
+                >
+                  Search for this document
+                </button>
+              </div>
+            )}
+          </div>
+        )}
 
         {error && (
           <div className="error">

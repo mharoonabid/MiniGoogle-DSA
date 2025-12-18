@@ -180,9 +180,16 @@ void initializeCache(const fs::path& backendDir, const json& config) {
         g_cache.barrelLookup[std::stoi(key)] = val.get<int>();
     }
 
-    // Load binary barrel indices
-    for (int barrelId = 0; barrelId < 10; barrelId++) {
-        fs::path idxPath = binaryBarrelsDir / ("barrel_" + std::to_string(barrelId) + ".idx");
+    // Load binary barrel indices (0-9 and new_docs)
+    std::vector<std::string> barrelNames;
+    for (int i = 0; i < 10; i++) {
+        barrelNames.push_back(std::to_string(i));
+    }
+    barrelNames.push_back("new_docs");  // Add new_docs barrel
+    
+    for (const auto& barrelName : barrelNames) {
+        int barrelId = (barrelName == "new_docs") ? 10 : std::stoi(barrelName);
+        fs::path idxPath = binaryBarrelsDir / ("barrel_" + barrelName + ".idx");
 
         if (!fs::exists(idxPath)) {
             continue;
@@ -272,7 +279,10 @@ bool findPostingsBinary(
 
     // Open binary barrel file and seek to offset
     fs::path indexesDir = backendDir / config["indexes_dir"].get<std::string>();
-    fs::path binPath = indexesDir / "barrels_binary" / ("barrel_" + std::to_string(barrelIdOut) + ".bin");
+    
+    // Handle barrel 10 (new_docs) and regular barrels
+    std::string barrelFileName = (barrelIdOut == 10) ? "barrel_new_docs.bin" : ("barrel_" + std::to_string(barrelIdOut) + ".bin");
+    fs::path binPath = indexesDir / "barrels_binary" / barrelFileName;
 
     std::ifstream binFile(binPath, std::ios::binary);
     if (!binFile.is_open()) {
@@ -331,8 +341,10 @@ bool findPostingsJSON(
     barrelIdOut = it->second;
 
     fs::path indexesDir = backendDir / config["indexes_dir"].get<std::string>();
-    fs::path barrelPath = indexesDir / config["barrels_dir"].get<std::string>() /
-                          ("inverted_barrel_" + std::to_string(barrelIdOut) + ".json");
+    
+    // Handle barrel 10 (new_docs) and regular barrels
+    std::string barrelFileName = (barrelIdOut == 10) ? "inverted_barrel_new_docs.json" : ("inverted_barrel_" + std::to_string(barrelIdOut) + ".json");
+    fs::path barrelPath = indexesDir / config["barrels_dir"].get<std::string>() / barrelFileName;
 
     std::cout << "[WARNING: Using slow JSON barrel. Run barrels_binary first!]" << std::endl;
 
@@ -375,13 +387,76 @@ bool findPostings(
     int& dfOut,
     int& barrelIdOut
 ) {
+    bool foundMain = false;
+
     // Try binary first (fast)
     if (findPostingsBinary(backendDir, config, lemmaId, postingsOut, dfOut, barrelIdOut)) {
-        return true;
+        foundMain = true;
+    } else {
+        // Fallback to JSON (slow)
+        foundMain = findPostingsJSON(backendDir, config, lemmaId, postingsOut, dfOut, barrelIdOut);
     }
 
-    // Fallback to JSON (slow)
-    return findPostingsJSON(backendDir, config, lemmaId, postingsOut, dfOut, barrelIdOut);
+    // ALSO check barrel 10 (new_docs) for newly indexed documents
+    // This ensures newly uploaded documents are immediately searchable
+    if (barrelIdOut != 10) {  // Don't double-check if main barrel was already 10
+        auto& newDocsIdx = g_cache.barrelIndices[10];
+        auto newDocsIt = newDocsIdx.find(lemmaId);
+        if (newDocsIt != newDocsIdx.end()) {
+            // Found in new_docs barrel, merge results
+            IndexEntry entry = newDocsIt->second;
+
+            fs::path indexesDir = backendDir / config["indexes_dir"].get<std::string>();
+            fs::path binPath = indexesDir / "barrels_binary" / "barrel_new_docs.bin";
+
+            std::ifstream binFile(binPath, std::ios::binary);
+            if (binFile.is_open()) {
+                binFile.seekg(entry.offset);
+
+                int32_t readLemmaId, newDf, numDocs;
+                binFile.read(reinterpret_cast<char*>(&readLemmaId), sizeof(readLemmaId));
+                binFile.read(reinterpret_cast<char*>(&newDf), sizeof(newDf));
+                binFile.read(reinterpret_cast<char*>(&numDocs), sizeof(numDocs));
+
+                // Collect doc IDs we already have
+                std::unordered_set<std::string> existingDocs;
+                for (const auto& p : postingsOut) {
+                    existingDocs.insert(p.docId);
+                }
+
+                // Read and merge new postings
+                for (int i = 0; i < numDocs; i++) {
+                    char docIdBuf[DOC_ID_SIZE];
+                    int32_t tf;
+
+                    binFile.read(docIdBuf, DOC_ID_SIZE);
+                    binFile.read(reinterpret_cast<char*>(&tf), sizeof(tf));
+
+                    std::string docId(docIdBuf);
+                    // Remove null padding
+                    size_t nullPos = docId.find('\0');
+                    if (nullPos != std::string::npos) {
+                        docId = docId.substr(0, nullPos);
+                    }
+
+                    if (existingDocs.find(docId) == existingDocs.end()) {
+                        DocPosting dp;
+                        dp.docId = docId;
+                        dp.tf = tf;
+                        dp.docLength = AVG_DOC_LENGTH;
+                        dp.score = 0.0;
+                        postingsOut.push_back(dp);
+                        dfOut++;  // Increment df for new docs
+                    }
+                }
+
+                binFile.close();
+                foundMain = true;
+            }
+        }
+    }
+
+    return foundMain;
 }
 
 // ---------------------- BM25 Scoring ----------------------

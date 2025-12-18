@@ -42,8 +42,10 @@ MiniGoogle-DSA
     ├── cpp/
     │   ├── forwardIndex.cpp
     │   ├── invertedIndex.cpp
-    │   └── barrels.hpp
-    │   ├── config.cpp
+    │   └── barrels.cpp
+    │   └── barrels_binary.cpp
+    │   └── search.cpp
+    │   └── search_semantic.cpp
     │   ├── config.hpp
     │   └── json.hpp
     │   ├── build/
@@ -52,6 +54,19 @@ MiniGoogle-DSA
     ├── data/
     ├── indexes/
     └── requirements.txt
+└── frontend/
+    └── eslint.config.js
+    └── index.html
+    └── package-lock.json
+    └── package.json
+    └── vite.config.json
+    ├── public/
+    ├── src/
+    │   └── assets/
+    │   └── App.css
+    │   └── App.jsx
+    │   └── index.css
+    │   └── main.jsx
 ```
 ---
 
@@ -59,7 +74,7 @@ MiniGoogle-DSA
 
 
 ### 4. Basic Setup
-The search engine relies on four sequential steps to process raw data and generate indices. But you can run this entire build process automatically using the provided scripts. **Ensure you are in root directory (`MiniGoogle-DSA/`).**
+You can run this entire build process automatically using the provided scripts. **Ensure you are in root directory (`MiniGoogle-DSA/`).**
 
 **Linux/MacOS**
 ```
