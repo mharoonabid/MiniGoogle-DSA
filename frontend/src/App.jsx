@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import './App.css'
 
-const API_BASE = 'http://localhost:5000'
+const API_BASE = 'http://74.225.189.98:5000'
 
 function App() {
   const [query, setQuery] = useState('')
